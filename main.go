@@ -1,16 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"flag"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"time"
-	"strconv"
 	"net/http/httputil"
-	"bytes"
+	"strconv"
+	"time"
+
+	"github.com/natefinch/lumberjack"
 )
 
 var (
@@ -18,6 +20,7 @@ var (
 	secure  bool
 	pemPath string
 	keyPath string
+	logPath string
 )
 
 func init() {
@@ -25,7 +28,17 @@ func init() {
 	flag.BoolVar(&secure, "secure", false, "use https")
 	flag.StringVar(&pemPath, "pem", "server.pem", "path to pem file")
 	flag.StringVar(&keyPath, "key", "server.key", "path to key file")
+	flag.StringVar(&logPath, "log", "", "log path")
 	flag.Parse()
+
+	if logPath != "" {
+		log.SetOutput(&lumberjack.Logger{
+			Filename:   logPath,
+			MaxSize:    1,
+			MaxBackups: 3,
+			Compress:   true,
+		})
+	}
 }
 
 func transfer(destination io.WriteCloser, source io.ReadCloser) {
@@ -107,6 +120,7 @@ func main() {
 	server := http.Server{
 		Addr: ":" + strconv.Itoa(port),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("incoming request: %-15s -> %s\n", r.RemoteAddr, r.URL.String())
 			if r.Method == http.MethodConnect {
 				handleConnect(w, r)
 			} else {
