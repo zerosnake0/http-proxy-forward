@@ -1,0 +1,23 @@
+port: 3129
+auth:
+  force: false
+  smart: abc
+  direct: def
+tls:
+  enabled: false
+log:
+  path: ""
+
+proxy:
+  http:
+  https:
+
+autoproxy:
+  sortDuration: 5m
+  files:
+    - autoproxy.txt
+
+connect:
+  sortDuration: 5m
+  files:
+    - connect.txt

@@ -1,20 +1,19 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/mattn/go-colorable"
@@ -30,8 +29,9 @@ import (
 var config struct {
 	Port int `yaml:"port"`
 	Auth struct {
-		User     string `yaml:"user"`
-		Password string `yaml:"password"`
+		Force  bool   `yaml:"force"`
+		Smart  string `yaml:"smart"`
+		Direct string `yaml:"direct"`
 	}
 	TLS struct {
 		Enabled bool   `yaml:"enabled"`
@@ -44,23 +44,28 @@ var config struct {
 	}
 
 	Proxy struct {
-		HTTP    string `yaml:"http"`
-		HTTPS   string `yaml:"https"`
-		NoPROXY struct {
-			Files []string `yaml:"files"`
-		} `yaml:"no_proxy"`
+		HTTP  string `yaml:"http"`
+		HTTPS string `yaml:"https"`
 	} `yaml:"proxy"`
 	AutoProxy struct {
 		SortDuration string   `yaml:"sortDuration"`
 		Files        []string `yaml:"files"`
 	} `yaml:"autoproxy"`
+	Connect struct {
+		SortDuration string   `yaml:"sortDuration"`
+		Files        []string `yaml:"files"`
+	} `yaml:"connect"`
 }
 
+type userKey struct{}
+
 var (
-	ap              *autoproxy.AutoProxy
-	authString      string
-	proxyConfigFunc func(*url.URL) (*url.URL, error)
-	roundTripper    http.RoundTripper
+	ap               *autoproxy.AutoProxy
+	authSmart        string
+	authDirect       string
+	proxyConfigFunc  func(*url.URL) (*url.URL, error)
+	roundTripper     http.RoundTripper
+	connectProxyFunc func(req *http.Request) (*url.URL, error)
 )
 
 func loadConfig(configFile string) error {
@@ -71,34 +76,49 @@ func loadConfig(configFile string) error {
 	return yaml.Unmarshal(b, &config)
 }
 
-func setupAutoProxy() {
-	sd, err := time.ParseDuration(config.AutoProxy.SortDuration)
+func loadAutoProxy(sortDuration string, files []string) (*autoproxy.AutoProxy, error) {
+	sd, err := time.ParseDuration(sortDuration)
 	if err != nil {
-		log.Fatal().Err(err).Str("duration", config.AutoProxy.SortDuration).Msg("bad sort duration")
+		return nil, err
 	}
-	ap = autoproxy.New(&autoproxy.Option{
+	proxy := autoproxy.New(&autoproxy.Option{
 		SortPeriod: sd,
 	})
-	for _, fileName := range config.AutoProxy.Files {
+	for _, fileName := range files {
 		b, err := ioutil.ReadFile(fileName)
 		if err != nil {
-			log.Fatal().Err(err).Str("file", fileName).Msg("unable to read autoproxy file")
+			return nil, fmt.Errorf("unable to read autoproxy from file %q: %s", fileName, err)
 		}
-		err = ap.Read(bytes.NewReader(b))
+		err = proxy.Read(bytes.NewReader(b))
 		if err != nil {
-			log.Fatal().Err(err).Str("file", fileName).Msg("unable to read autoproxy file")
+			return nil, fmt.Errorf("unable to read autoproxy from file %q: %s", fileName, err)
 		}
 	}
+	return proxy, nil
+}
 
-	roundTripper = &http.Transport{
-		Proxy: func(req *http.Request) (*url.URL, error) {
+func proxyFunc(ap *autoproxy.AutoProxy) func(req *http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
+		user := req.Context().Value(userKey{}).(string)
+		if user == "smart" {
 			match := ap.Match(req.URL)
 			hlog.FromRequest(req).Info().Bool("match", match).Msg("proxy")
 			if !match {
 				return nil, nil
 			}
-			return proxyConfigFunc(req.URL)
-		},
+		}
+		return proxyConfigFunc(req.URL)
+	}
+}
+
+func setupAutoProxy() {
+	var err error
+	ap, err = loadAutoProxy(config.AutoProxy.SortDuration, config.AutoProxy.Files)
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to load autoproxy")
+	}
+	roundTripper = &http.Transport{
+		Proxy: proxyFunc(ap),
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -112,39 +132,30 @@ func setupAutoProxy() {
 	}
 }
 
+func formatAuthString(user, pwd string) string {
+	auth := user + ":" + pwd
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+}
+
 func setupAuthString() {
-	auth := config.Auth.User + ":" + config.Auth.Password
-	authString = "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+	authSmart = formatAuthString("smart", config.Auth.Smart)
+	authDirect = formatAuthString("direct", config.Auth.Direct)
 }
 
 func setupProxy() {
-	var noProxy strings.Builder
-	for _, fileName := range config.Proxy.NoPROXY.Files {
-		fp, err := os.Open(fileName)
-		if err != nil {
-			log.Fatal().Err(err).Str("file", fileName).Msg("unable to open file")
-		}
-		func() {
-			defer fp.Close()
-			scanner := bufio.NewScanner(fp)
-			for scanner.Scan() {
-				if noProxy.Len() > 0 {
-					noProxy.WriteByte(',')
-				}
-				noProxy.Write(scanner.Bytes())
-			}
-			if scanner.Err() != nil {
-				log.Fatal().Err(err).Str("file", fileName).Msg("error while scanning")
-			}
-		}()
-	}
-
 	proxyConfig := httpproxy.Config{
 		HTTPProxy:  config.Proxy.HTTP,
 		HTTPSProxy: config.Proxy.HTTPS,
-		NoProxy:    noProxy.String(),
 	}
 	proxyConfigFunc = proxyConfig.ProxyFunc()
+}
+
+func setupConnectProxy() {
+	connectAP, err := loadAutoProxy(config.Connect.SortDuration, config.Connect.Files)
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to load connect autoproxy")
+	}
+	connectProxyFunc = proxyFunc(connectAP)
 }
 
 func init() {
@@ -174,6 +185,7 @@ func init() {
 	setupAuthString()
 	setupProxy()
 	setupAutoProxy()
+	setupConnectProxy()
 }
 
 func transfer(destination io.WriteCloser, source io.ReadCloser) {
@@ -183,19 +195,21 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func handleConnect(w http.ResponseWriter, r *http.Request) {
-	proxyURL, err := proxyConfigFunc(r.URL)
+	proxyURL, err := connectProxyFunc(r)
 	if err != nil {
 		hlog.FromRequest(r).Error().Err(err).Msg("unable to get proxy url")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	hlog.FromRequest(r).Info().Bool("match", proxyURL != nil).Msg("proxy")
 	var host string
 	if proxyURL == nil {
 		host = r.URL.Host
 	} else {
 		host = proxyURL.Host
 	}
-	dstConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+	d := net.Dialer{}
+	dstConn, err := d.DialContext(r.Context(), "tcp", host)
 	if err != nil {
 		hlog.FromRequest(r).Error().Err(err).Msg("unable to dial")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -253,20 +267,27 @@ func copyHeader(dst, src http.Header) {
 
 func auth(f http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Proxy-Authorization"); auth != authString {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		user := "direct"
+		auth := r.Header.Get("Proxy-Authorization")
+		switch auth {
+		case authSmart:
+			user = "smart"
+		case authDirect:
+		default:
+			if config.Auth.Force {
+				hlog.FromRequest(r).Error().Msg("unauthorized")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 		}
+		r = r.WithContext(context.WithValue(r.Context(), userKey{}, user))
 		f.ServeHTTP(w, r)
 	}
 }
 
 func getHandler(f http.HandlerFunc) http.Handler {
 	var h http.Handler = f
-	if config.Auth.User != "" || config.Auth.Password != "" {
-		log.Info().Msg("using authorization")
-		h = auth(h)
-	}
+	h = auth(h)
 	h = hlog.AccessHandler(func(r *http.Request, status, size int, duration time.Duration) {
 		hlog.FromRequest(r).Info().Int("status", status).Int("size", size).
 			Dur("duration", duration).Msg("done")
