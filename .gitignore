@@ -1,3 +1,6 @@
 .idea
 server.pem
 server.key
+
+*.txt
+config.yaml

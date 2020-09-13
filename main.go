@@ -2,38 +2,108 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
+	"gopkg.in/yaml.v2"
+
 	"github.com/natefinch/lumberjack"
+	"github.com/zerosnake0/autoproxy"
 )
 
+var config struct {
+	Port int `yaml:"port"`
+	TLS  struct {
+		Enabled bool   `yaml:"enabled"`
+		Cert    string `yaml:"cert"`
+		Key     string `yaml:"key"`
+	} `yaml:"tls"`
+
+	Log struct {
+		Path string `yaml:"path"`
+	}
+	AutoProxy struct {
+		SortDuration string   `yaml:"sortDuration"`
+		Files        []string `yaml:"files"`
+	} `yaml:"autoproxy"`
+}
+
 var (
-	port    int
-	secure  bool
-	pemPath string
-	keyPath string
-	logPath string
+	ap           *autoproxy.AutoProxy
+	sn           uint64
+	proxyFunc    func(*http.Request) (*url.URL, error)
+	roundTripper http.RoundTripper
 )
 
 func init() {
-	flag.IntVar(&port, "port", 9000, "port")
-	flag.BoolVar(&secure, "secure", false, "use https")
-	flag.StringVar(&pemPath, "pem", "server.pem", "path to pem file")
-	flag.StringVar(&keyPath, "key", "server.key", "path to key file")
-	flag.StringVar(&logPath, "log", "", "log path")
+	var configFile string
+	flag.StringVar(&configFile, "config", "config.yaml", "config yaml file")
 	flag.Parse()
 
-	if logPath != "" {
+	b, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		log.Fatalf("unable to read config file %q: %s", configFile, err)
+	}
+
+	if err := yaml.Unmarshal(b, &config); err != nil {
+		log.Fatalf("unable to unmarshal config: %s", err)
+	}
+
+	// autoproxy
+	sd, err := time.ParseDuration(config.AutoProxy.SortDuration)
+	if err != nil {
+		log.Fatalf("bad sort duration %q: %s", config.AutoProxy.SortDuration, err)
+	}
+	ap = autoproxy.New(&autoproxy.Option{
+		SortPeriod: sd,
+	})
+	for _, fileName := range config.AutoProxy.Files {
+		b, err := ioutil.ReadFile(fileName)
+		if err != nil {
+			log.Fatalf("unable to read autoproxy file %q: %s", fileName, err)
+		}
+		err = ap.Read(bytes.NewReader(b))
+		if err != nil {
+			log.Fatalf("unable to read autoproxy rules of file %q: %s", fileName, err)
+		}
+	}
+	proxyFunc = func(req *http.Request) (*url.URL, error) {
+		match := ap.Match(req.URL)
+		log.Printf("%d match: %t", req.Context().Value("id").(uint64), match)
+		if !match {
+			return nil, nil
+		}
+		return http.ProxyFromEnvironment(req)
+	}
+	roundTripper = &http.Transport{
+		Proxy: proxyFunc,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	if config.Log.Path != "" {
 		log.SetOutput(&lumberjack.Logger{
-			Filename:   logPath,
+			Filename:   config.Log.Path,
 			MaxSize:    1,
 			MaxBackups: 3,
 			Compress:   true,
@@ -48,7 +118,7 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func handleConnect(w http.ResponseWriter, r *http.Request) {
-	proxyURL, err := http.ProxyFromEnvironment(r)
+	proxyURL, err := proxyFunc(r)
 	if err != nil {
 		log.Println("unable to get proxy url", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -97,7 +167,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHTTP(w http.ResponseWriter, req *http.Request) {
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := roundTripper.RoundTrip(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -118,9 +188,13 @@ func copyHeader(dst, src http.Header) {
 
 func main() {
 	server := http.Server{
-		Addr: ":" + strconv.Itoa(port),
+		Addr: ":" + strconv.Itoa(config.Port),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("incoming request: %-15s -> %s\n", r.RemoteAddr, r.URL.String())
+			id := atomic.AddUint64(&sn, 1)
+			msg := fmt.Sprintf("[%d] %-15s -> %s", id, r.RemoteAddr, r.URL.String())
+			log.Printf("beg: %s", msg)
+			defer log.Printf("end: %s", msg)
+			r = r.WithContext(context.WithValue(r.Context(), "id", id))
 			if r.Method == http.MethodConnect {
 				handleConnect(w, r)
 			} else {
@@ -131,8 +205,8 @@ func main() {
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 	log.Println("serving...")
-	if secure {
-		log.Fatal(server.ListenAndServeTLS(pemPath, keyPath))
+	if config.TLS.Enabled {
+		log.Fatal(server.ListenAndServeTLS(config.TLS.Cert, config.TLS.Key))
 	} else {
 		log.Fatal(server.ListenAndServe())
 	}
