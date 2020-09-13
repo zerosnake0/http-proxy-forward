@@ -21,8 +21,8 @@ github.com/rs/zerolog v1.19.0/go.mod h1:IzD0RJ65iWH0w97OQQebJEvTZYvsCUm9WVLWBQrJ
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/testify v1.6.1 h1:hDPOHmpOpP40lSULcqw7IrRb/u7w6RpDC9399XyoNd0=
 github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
-github.com/zerosnake0/autoproxy v0.0.1 h1:u9o28p3PmKD+Qx3SZWophQri/bE6ZphIi9M3Y5n5Tzo=
-github.com/zerosnake0/autoproxy v0.0.1/go.mod h1:L4fqYx0mSdI3U544OZMhiiqs9d3Qcrcum11OZv+3xM0=
+github.com/zerosnake0/autoproxy v0.0.2 h1:mpEQthWjnYJrQiITyGbXAsHbB+8SpKFTemlCL3B2/tk=
+github.com/zerosnake0/autoproxy v0.0.2/go.mod h1:L4fqYx0mSdI3U544OZMhiiqs9d3Qcrcum11OZv+3xM0=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/net v0.0.0-20190311183353-d8887717615a h1:oWX7TPOiFAMXLq8o0ikBYfCJVlRHBcsciT5bXOrH628=
 golang.org/x/net v0.0.0-20190311183353-d8887717615a/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
