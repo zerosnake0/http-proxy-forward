@@ -4,3 +4,4 @@ server.key
 
 *.txt
 config.yaml
+bin
