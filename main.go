@@ -40,7 +40,8 @@ var config struct {
 	} `yaml:"tls"`
 
 	Log struct {
-		Path string `yaml:"path"`
+		Format string `yaml:"format"`
+		Path   string `yaml:"path"`
 	}
 
 	Proxy struct {
@@ -174,12 +175,19 @@ func init() {
 	}
 
 	if config.Log.Path != "" {
-		log.Logger = zerolog.New(&lumberjack.Logger{
+		var writer io.Writer = &lumberjack.Logger{
 			Filename:   config.Log.Path,
 			MaxSize:    1,
 			MaxBackups: 3,
 			Compress:   true,
-		}).With().Timestamp().Logger()
+		}
+		if config.Log.Format != "json" {
+			writer = zerolog.NewConsoleWriter(func(cw *zerolog.ConsoleWriter) {
+				cw.TimeFormat = time.RFC3339
+				cw.Out = colorable.NewNonColorable(writer)
+			})
+		}
+		log.Logger = zerolog.New(writer).With().Timestamp().Logger()
 	}
 
 	setupAuthString()
