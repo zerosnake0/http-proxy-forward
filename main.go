@@ -2,30 +2,34 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
-	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
-	"sync/atomic"
 	"time"
 
-	"gopkg.in/yaml.v2"
-
+	"github.com/mattn/go-colorable"
 	"github.com/natefinch/lumberjack"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/hlog"
+	"github.com/rs/zerolog/log"
 	"github.com/zerosnake0/autoproxy"
+	"gopkg.in/yaml.v2"
 )
 
 var config struct {
 	Port int `yaml:"port"`
-	TLS  struct {
+	Auth struct {
+		User     string `yaml:"user"`
+		Password string `yaml:"password"`
+	}
+	TLS struct {
 		Enabled bool   `yaml:"enabled"`
 		Cert    string `yaml:"cert"`
 		Key     string `yaml:"key"`
@@ -43,28 +47,23 @@ var config struct {
 var (
 	ap           *autoproxy.AutoProxy
 	sn           uint64
+	authString   string
 	proxyFunc    func(*http.Request) (*url.URL, error)
 	roundTripper http.RoundTripper
 )
 
-func init() {
-	var configFile string
-	flag.StringVar(&configFile, "config", "config.yaml", "config yaml file")
-	flag.Parse()
-
+func loadConfig(configFile string) error {
 	b, err := ioutil.ReadFile(configFile)
 	if err != nil {
-		log.Fatalf("unable to read config file %q: %s", configFile, err)
+		return err
 	}
+	return yaml.Unmarshal(b, &config)
+}
 
-	if err := yaml.Unmarshal(b, &config); err != nil {
-		log.Fatalf("unable to unmarshal config: %s", err)
-	}
-
-	// autoproxy
+func setupAutoProxy() {
 	sd, err := time.ParseDuration(config.AutoProxy.SortDuration)
 	if err != nil {
-		log.Fatalf("bad sort duration %q: %s", config.AutoProxy.SortDuration, err)
+		log.Fatal().Err(err).Str("duration", config.AutoProxy.SortDuration).Msg("bad sort duration")
 	}
 	ap = autoproxy.New(&autoproxy.Option{
 		SortPeriod: sd,
@@ -72,16 +71,16 @@ func init() {
 	for _, fileName := range config.AutoProxy.Files {
 		b, err := ioutil.ReadFile(fileName)
 		if err != nil {
-			log.Fatalf("unable to read autoproxy file %q: %s", fileName, err)
+			log.Fatal().Err(err).Str("file", fileName).Msg("unable to read autoproxy file")
 		}
 		err = ap.Read(bytes.NewReader(b))
 		if err != nil {
-			log.Fatalf("unable to read autoproxy rules of file %q: %s", fileName, err)
+			log.Fatal().Err(err).Str("file", fileName).Msg("unable to read autoproxy file")
 		}
 	}
 	proxyFunc = func(req *http.Request) (*url.URL, error) {
 		match := ap.Match(req.URL)
-		log.Printf("%d match: %t", req.Context().Value("id").(uint64), match)
+		hlog.FromRequest(req).Info().Bool("match", match).Msg("proxy")
 		if !match {
 			return nil, nil
 		}
@@ -100,15 +99,39 @@ func init() {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+}
+
+func setupAuthString() {
+	auth := config.Auth.User + ":" + config.Auth.Password
+	authString = "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+}
+
+func init() {
+	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
+		w.TimeFormat = time.RFC3339
+		w.Out = colorable.NewColorableStdout()
+	})
+	log.Logger = zerolog.New(consoleWriter).With().Timestamp().Logger()
+
+	var configFile string
+	flag.StringVar(&configFile, "config", "config.yaml", "config yaml file")
+	flag.Parse()
+
+	if err := loadConfig(configFile); err != nil {
+		log.Fatal().Err(err).Str("file", configFile).Msg("unable to read config file")
+	}
 
 	if config.Log.Path != "" {
-		log.SetOutput(&lumberjack.Logger{
+		log.Logger = zerolog.New(&lumberjack.Logger{
 			Filename:   config.Log.Path,
 			MaxSize:    1,
 			MaxBackups: 3,
 			Compress:   true,
-		})
+		}).With().Timestamp().Logger()
 	}
+
+	setupAutoProxy()
+	setupAuthString()
 }
 
 func transfer(destination io.WriteCloser, source io.ReadCloser) {
@@ -120,7 +143,7 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 func handleConnect(w http.ResponseWriter, r *http.Request) {
 	proxyURL, err := proxyFunc(r)
 	if err != nil {
-		log.Println("unable to get proxy url", err)
+		hlog.FromRequest(r).Error().Err(err).Msg("unable to get proxy url")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -132,19 +155,19 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	dstConn, err := net.DialTimeout("tcp", host, 10*time.Second)
 	if err != nil {
-		log.Println("unable to dial", err)
+		hlog.FromRequest(r).Error().Err(err).Msg("unable to dial")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	if proxyURL != nil {
 		b, err := httputil.DumpRequest(r, true)
 		if err != nil {
-			log.Println("unable to dump request", err)
+			hlog.FromRequest(r).Error().Err(err).Msg("unable to dump request")
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		if _, err := io.Copy(dstConn, bytes.NewReader(b)); err != nil {
-			log.Println("unable to send connection", err)
+			hlog.FromRequest(r).Error().Err(err).Msg("unable to send connection")
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -153,7 +176,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		log.Println("Hijacking not supported")
+		log.Error().Msg("Hijacking not supported")
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
@@ -186,15 +209,38 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
+func auth(f http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Proxy-Authorization"); auth != authString {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		f.ServeHTTP(w, r)
+	}
+}
+
+func getHandler(f http.HandlerFunc) http.Handler {
+	var h http.Handler = f
+	if config.Auth.User != "" || config.Auth.Password != "" {
+		log.Info().Msg("using authorization")
+		h = auth(h)
+	}
+	h = hlog.AccessHandler(func(r *http.Request, status, size int, duration time.Duration) {
+		hlog.FromRequest(r).Info().Int("status", status).Int("size", size).
+			Dur("duration", duration).Msg("done")
+	})(h)
+	h = hlog.RequestHandler("req")(h)
+	h = hlog.RemoteAddrHandler("ip")(h)
+	h = hlog.UserAgentHandler("user_agent")(h)
+	h = hlog.RequestIDHandler("req_id", "")(h)
+	h = hlog.NewHandler(log.Logger)(h)
+	return h
+}
+
 func main() {
 	server := http.Server{
 		Addr: ":" + strconv.Itoa(config.Port),
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := atomic.AddUint64(&sn, 1)
-			msg := fmt.Sprintf("[%d] %-15s -> %s", id, r.RemoteAddr, r.URL.String())
-			log.Printf("beg: %s", msg)
-			defer log.Printf("end: %s", msg)
-			r = r.WithContext(context.WithValue(r.Context(), "id", id))
+		Handler: getHandler(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
 				handleConnect(w, r)
 			} else {
@@ -204,10 +250,12 @@ func main() {
 		// Disable HTTP/2.
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
-	log.Println("serving...")
+	log.Info().Msg("serving...")
+	var err error
 	if config.TLS.Enabled {
-		log.Fatal(server.ListenAndServeTLS(config.TLS.Cert, config.TLS.Key))
+		err = server.ListenAndServeTLS(config.TLS.Cert, config.TLS.Key)
 	} else {
-		log.Fatal(server.ListenAndServe())
+		err = server.ListenAndServe()
 	}
+	log.Fatal().Err(err).Msg("error while serving")
 }
