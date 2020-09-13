@@ -8,7 +8,7 @@ require (
 	github.com/natefinch/lumberjack v2.0.0+incompatible
 	github.com/rs/zerolog v1.19.0
 	github.com/zerosnake0/autoproxy v0.0.2
-	golang.org/x/sys v0.0.0-20200323222414-85ca7c5b95cd // indirect
+	golang.org/x/net v0.0.0-20200904194848-62affa334b73
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v2 v2.3.0
 )

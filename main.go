@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
@@ -11,7 +12,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mattn/go-colorable"
@@ -20,6 +23,7 @@ import (
 	"github.com/rs/zerolog/hlog"
 	"github.com/rs/zerolog/log"
 	"github.com/zerosnake0/autoproxy"
+	"golang.org/x/net/http/httpproxy"
 	"gopkg.in/yaml.v2"
 )
 
@@ -38,6 +42,14 @@ var config struct {
 	Log struct {
 		Path string `yaml:"path"`
 	}
+
+	Proxy struct {
+		HTTP    string `yaml:"http"`
+		HTTPS   string `yaml:"https"`
+		NoPROXY struct {
+			Files []string `yaml:"files"`
+		} `yaml:"no_proxy"`
+	} `yaml:"proxy"`
 	AutoProxy struct {
 		SortDuration string   `yaml:"sortDuration"`
 		Files        []string `yaml:"files"`
@@ -45,11 +57,10 @@ var config struct {
 }
 
 var (
-	ap           *autoproxy.AutoProxy
-	sn           uint64
-	authString   string
-	proxyFunc    func(*http.Request) (*url.URL, error)
-	roundTripper http.RoundTripper
+	ap              *autoproxy.AutoProxy
+	authString      string
+	proxyConfigFunc func(*url.URL) (*url.URL, error)
+	roundTripper    http.RoundTripper
 )
 
 func loadConfig(configFile string) error {
@@ -78,16 +89,16 @@ func setupAutoProxy() {
 			log.Fatal().Err(err).Str("file", fileName).Msg("unable to read autoproxy file")
 		}
 	}
-	proxyFunc = func(req *http.Request) (*url.URL, error) {
-		match := ap.Match(req.URL)
-		hlog.FromRequest(req).Info().Bool("match", match).Msg("proxy")
-		if !match {
-			return nil, nil
-		}
-		return http.ProxyFromEnvironment(req)
-	}
+
 	roundTripper = &http.Transport{
-		Proxy: proxyFunc,
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			match := ap.Match(req.URL)
+			hlog.FromRequest(req).Info().Bool("match", match).Msg("proxy")
+			if !match {
+				return nil, nil
+			}
+			return proxyConfigFunc(req.URL)
+		},
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -104,6 +115,36 @@ func setupAutoProxy() {
 func setupAuthString() {
 	auth := config.Auth.User + ":" + config.Auth.Password
 	authString = "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+}
+
+func setupProxy() {
+	var noProxy strings.Builder
+	for _, fileName := range config.Proxy.NoPROXY.Files {
+		fp, err := os.Open(fileName)
+		if err != nil {
+			log.Fatal().Err(err).Str("file", fileName).Msg("unable to open file")
+		}
+		func() {
+			defer fp.Close()
+			scanner := bufio.NewScanner(fp)
+			for scanner.Scan() {
+				if noProxy.Len() > 0 {
+					noProxy.WriteByte(',')
+				}
+				noProxy.Write(scanner.Bytes())
+			}
+			if scanner.Err() != nil {
+				log.Fatal().Err(err).Str("file", fileName).Msg("error while scanning")
+			}
+		}()
+	}
+
+	proxyConfig := httpproxy.Config{
+		HTTPProxy:  config.Proxy.HTTP,
+		HTTPSProxy: config.Proxy.HTTPS,
+		NoProxy:    noProxy.String(),
+	}
+	proxyConfigFunc = proxyConfig.ProxyFunc()
 }
 
 func init() {
@@ -130,8 +171,9 @@ func init() {
 		}).With().Timestamp().Logger()
 	}
 
-	setupAutoProxy()
 	setupAuthString()
+	setupProxy()
+	setupAutoProxy()
 }
 
 func transfer(destination io.WriteCloser, source io.ReadCloser) {
@@ -141,7 +183,7 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func handleConnect(w http.ResponseWriter, r *http.Request) {
-	proxyURL, err := proxyFunc(r)
+	proxyURL, err := proxyConfigFunc(r.URL)
 	if err != nil {
 		hlog.FromRequest(r).Error().Err(err).Msg("unable to get proxy url")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
