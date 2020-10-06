@@ -13,11 +13,13 @@ proxy:
   https:
 
 autoproxy:
+  enabled: false
   sortDuration: 5m
   files:
     - autoproxy.txt
 
 connect:
+  enabled: false
   sortDuration: 5m
   files:
     - connect.txt

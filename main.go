@@ -49,10 +49,12 @@ var config struct {
 		HTTPS string `yaml:"https"`
 	} `yaml:"proxy"`
 	AutoProxy struct {
+		Enabled      bool     `yaml:"enabled"`
 		SortDuration string   `yaml:"sortDuration"`
 		Files        []string `yaml:"files"`
 	} `yaml:"autoproxy"`
 	Connect struct {
+		Enabled      bool     `yaml:"enabled"`
 		SortDuration string   `yaml:"sortDuration"`
 		Files        []string `yaml:"files"`
 	} `yaml:"connect"`
@@ -100,12 +102,14 @@ func loadAutoProxy(sortDuration string, files []string) (*autoproxy.AutoProxy, e
 
 func proxyFunc(ap *autoproxy.AutoProxy) func(req *http.Request) (*url.URL, error) {
 	return func(req *http.Request) (*url.URL, error) {
-		user := req.Context().Value(userKey{}).(string)
-		if user == "smart" {
-			match := ap.Match(req.URL)
-			hlog.FromRequest(req).Info().Bool("match", match).Msg("proxy")
-			if !match {
-				return nil, nil
+		if ap != nil {
+			user := req.Context().Value(userKey{}).(string)
+			if user == "smart" {
+				match := ap.Match(req.URL)
+				hlog.FromRequest(req).Info().Bool("match", match).Msg("proxy")
+				if !match {
+					return nil, nil
+				}
 			}
 		}
 		return proxyConfigFunc(req.URL)
@@ -113,10 +117,12 @@ func proxyFunc(ap *autoproxy.AutoProxy) func(req *http.Request) (*url.URL, error
 }
 
 func setupAutoProxy() {
-	var err error
-	ap, err = loadAutoProxy(config.AutoProxy.SortDuration, config.AutoProxy.Files)
-	if err != nil {
-		log.Fatal().Err(err).Msg("unable to load autoproxy")
+	if config.AutoProxy.Enabled {
+		var err error
+		ap, err = loadAutoProxy(config.AutoProxy.SortDuration, config.AutoProxy.Files)
+		if err != nil {
+			log.Fatal().Err(err).Msg("unable to load autoproxy")
+		}
 	}
 	roundTripper = &http.Transport{
 		Proxy: proxyFunc(ap),
@@ -152,9 +158,15 @@ func setupProxy() {
 }
 
 func setupConnectProxy() {
-	connectAP, err := loadAutoProxy(config.Connect.SortDuration, config.Connect.Files)
-	if err != nil {
-		log.Fatal().Err(err).Msg("unable to load connect autoproxy")
+	var (
+		connectAP *autoproxy.AutoProxy
+		err       error
+	)
+	if config.Connect.Enabled {
+		connectAP, err = loadAutoProxy(config.Connect.SortDuration, config.Connect.Files)
+		if err != nil {
+			log.Fatal().Err(err).Msg("unable to load connect autoproxy")
+		}
 	}
 	connectProxyFunc = proxyFunc(connectAP)
 }
